@@ -18,6 +18,7 @@ POST /classify
 """
 
 import os
+import requests
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -27,8 +28,25 @@ from pydantic import BaseModel, Field
 from schema import SecurityEvent, LABELS
 from inference import SecurityEventClassifier
 
-CHECKPOINT_PATH = os.environ.get("SLM_CHECKPOINT", "./checkpoints/model.pt")
-TOKENIZER_PATH = os.environ.get("SLM_TOKENIZER", "./artifacts/tokenizer.json")
+CHECKPOINT_URL = os.environ["SLM_CHECKPOINT_URL"]
+TOKENIZER_URL = os.environ["SLM_TOKENIZER_URL"]
+
+CHECKPOINT_PATH = "/tmp/model.pt"
+TOKENIZER_PATH = "/tmp/tokenizer.json"
+
+
+def download_file(url, path):
+    if not os.path.exists(path):
+        print(f"Downloading: {url}")
+
+        response = requests.get(url, timeout=300)
+        response.raise_for_status()
+
+        with open(path, "wb") as f:
+            f.write(response.content)
+
+        print(f"Downloaded: {path}")
+
 
 app = FastAPI(title="Zero-Trust Security Event Classifier", version="0.1.0")
 app.add_middleware(
@@ -60,14 +78,21 @@ class ClassificationResponse(BaseModel):
 @app.on_event("startup")
 def load_model():
     global _classifier
-    if not os.path.exists(CHECKPOINT_PATH):
-        # Don't crash the app if the model hasn't been trained yet — surface
-        # a clear error on the endpoint instead.
-        print(f"WARNING: checkpoint not found at {CHECKPOINT_PATH}. "
-              f"Train the model first (see train.py).")
-        return
-    _classifier = SecurityEventClassifier(CHECKPOINT_PATH, TOKENIZER_PATH)
+    
+    try:
+        download_file(CHECKPOINT_URL, CHECKPOINT_PATH)
+        download_file(TOKENIZER_URL, TOKENIZER_PATH)
 
+        _classifier = SecurityEventClassifier(
+            CHECKPOINT_PATH,
+            TOKENIZER_PATH,
+        )
+
+        print("✅ SecuritySLM loaded successfully")
+
+    except Exception as e:
+        print(f"❌ Failed to load SecuritySLM: {e}")
+        _classifier = None
 
 @app.get("/health")
 def health():
