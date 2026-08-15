@@ -1,22 +1,3 @@
-"""
-FastAPI service for the Security Event SLM. Mirrors the shape of your
-existing FastAPI backends (resume pipeline, CI/CD dashboard).
-
-Run:
-    uvicorn api:app --host 0.0.0.0 --port 8000
-
-POST /classify
-{
-  "actor": "user:ankur",
-  "action": "bulk_download",
-  "resource": "/finance/q3_report.xlsx",
-  "device_trust": "unmanaged",
-  "location": "unrecognized_ip",
-  "time": "03:12 UTC",
-  "prior_events": ["failed_mfa x2", "new_device_registered"]
-}
-"""
-
 import os
 import requests
 from typing import List, Optional
@@ -28,84 +9,83 @@ from pydantic import BaseModel, Field
 from schema import SecurityEvent, LABELS
 from inference import SecurityEventClassifier
 
-CHECKPOINT_URL = os.environ["SLM_CHECKPOINT_URL"]
-TOKENIZER_URL = os.environ["SLM_TOKENIZER_URL"]
-
+CHECKPOINT_URL  = os.environ.get("SLM_CHECKPOINT_URL", "")
+TOKENIZER_URL   = os.environ.get("SLM_TOKENIZER_URL",  "")
 CHECKPOINT_PATH = "/tmp/model.pt"
-TOKENIZER_PATH = "/tmp/tokenizer.json"
-
+TOKENIZER_PATH  = "/tmp/tokenizer.json"
 
 def download_file(url, path):
-    if not os.path.exists(path):
-        print(f"Downloading: {url}")
-
-        response = requests.get(url, timeout=300)
-        response.raise_for_status()
-
-        with open(path, "wb") as f:
-            f.write(response.content)
-
-        print(f"Downloaded: {path}")
-
+    if os.path.exists(path):
+        size = os.path.getsize(path)
+        print(f"Already exists: {path} ({size} bytes)")
+        if size > 1000:  # valid file
+            return
+    print(f"Downloading: {url}")
+    headers  = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(url, headers=headers, timeout=300, stream=True)
+    response.raise_for_status()
+    with open(path, "wb") as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            f.write(chunk)
+    print(f"Done: {path} ({os.path.getsize(path)} bytes)")
 
 app = FastAPI(title="Zero-Trust Security Event Classifier", version="0.1.0")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["*"],  # Vercel deploy ke baad specific URL daalna
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 _classifier: Optional[SecurityEventClassifier] = None
 
-
 class EventRequest(BaseModel):
-    actor: str
-    action: str
-    resource: str
+    actor:        str
+    action:       str
+    resource:     str
     device_trust: str = Field(pattern="^(managed|unmanaged|unknown)$")
-    location: str
-    time: str
+    location:     str
+    time:         str
     prior_events: List[str] = []
-
 
 class ClassificationResponse(BaseModel):
     classification: Optional[str]
-    explanation: Optional[str]
-    known_label: bool
-
+    explanation:    Optional[str]
+    known_label:    bool
 
 @app.on_event("startup")
 def load_model():
     global _classifier
-    
     try:
+        if not CHECKPOINT_URL or not TOKENIZER_URL:
+            print("❌ SLM_CHECKPOINT_URL or SLM_TOKENIZER_URL not set")
+            return
         download_file(CHECKPOINT_URL, CHECKPOINT_PATH)
-        download_file(TOKENIZER_URL, TOKENIZER_PATH)
-
-        _classifier = SecurityEventClassifier(
-            CHECKPOINT_PATH,
-            TOKENIZER_PATH,
-        )
-
-        print("✅ SecuritySLM loaded successfully")
-
+        download_file(TOKENIZER_URL,  TOKENIZER_PATH)
+        _classifier = SecurityEventClassifier(CHECKPOINT_PATH, TOKENIZER_PATH)
+        print("✅ Model loaded successfully")
     except Exception as e:
-        print(f"❌ Failed to load SecuritySLM: {e}")
+        import traceback
+        print(f"❌ Model load failed: {e}")
+        traceback.print_exc()
         _classifier = None
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model_loaded": _classifier is not None}
-
+    return {
+        "status":       "ok",
+        "model_loaded": _classifier is not None,
+        "checkpoint":   os.path.exists(CHECKPOINT_PATH),
+        "tokenizer":    os.path.exists(TOKENIZER_PATH),
+        "checkpoint_size": os.path.getsize(CHECKPOINT_PATH) if os.path.exists(CHECKPOINT_PATH) else 0,
+    }
 
 @app.post("/classify", response_model=ClassificationResponse)
 def classify(req: EventRequest):
     if _classifier is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Model not loaded. Train a checkpoint and set SLM_CHECKPOINT.",
-        )
+        raise HTTPException(status_code=503,
+            detail="Model not loaded.")
     event = SecurityEvent(
         actor=req.actor, action=req.action, resource=req.resource,
         device_trust=req.device_trust, location=req.location,
@@ -117,3 +97,4 @@ def classify(req: EventRequest):
         explanation=result["explanation"],
         known_label=result["classification"] in LABELS,
     )
+    
