@@ -35,7 +35,11 @@ app = FastAPI(title="Zero-Trust Security Event Classifier", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:3000",
+        "http://localhost:3001",
+        "https://zero-trust-slm.vercel.app",
+        "https://*.vercel.app",
+        ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
